@@ -246,6 +246,9 @@ var FlatpakPermissionsModel = GObject.registerClass({
     }
 
     _processPendingUpdates() {
+        if (this._appId === '')
+            return;
+
         if (this._delayedHandlerId === 0)
             return;
 
@@ -270,6 +273,9 @@ var FlatpakPermissionsModel = GObject.registerClass({
     }
 
     _setup() {
+        if (this._appId === '')
+            return;
+
         Object.values(MODELS).forEach(model => model.reset());
         this._loadPermissions();
         this._loadGlobalOverrides();
