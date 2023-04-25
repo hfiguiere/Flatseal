@@ -85,9 +85,6 @@ var FlatsealWindow = GObject.registerClass({
         this._permissions = permissions.getDefault();
         this._applications = applications.getDefault();
 
-        const allApplications = this._applications.getAll();
-        const allPermissions = this._permissions.getAll();
-
         this._detailsHeaderButton = new FlatsealDetailsButton(this._permissions);
         this._startHeaderBox.append(this._detailsHeaderButton);
         this._resetHeaderButton = new FlatsealResetButton(this._permissions);
@@ -95,8 +92,8 @@ var FlatsealWindow = GObject.registerClass({
 
         this._detailsActionButton = new FlatsealDetailsButton(this._permissions);
         this._startActionBox.append(this._detailsActionButton);
-        const resetActionButton = new FlatsealResetButton(this._permissions);
-        this._endActionBox.append(resetActionButton);
+        this._resetActionButton = new FlatsealResetButton(this._permissions);
+        this._endActionBox.append(this._resetActionButton);
 
         this._toast = new Adw.Toast();
         this._toast.title = _('Permissions have been reset');
@@ -109,9 +106,46 @@ var FlatsealWindow = GObject.registerClass({
             'folded', this._backButton, 'visible', _bindReadFlags);
         this._contentLeaflet.connect('notify::folded', this._updateVisibility.bind(this));
 
-        if (allApplications.length === 0 || allPermissions.length === 0)
-            return;
+        this._applicationsListBox.set_filter_func(this._filter.bind(this));
+        this._applicationsListBox.set_sort_func(this._sort.bind(this));
 
+        this._applicationsDelayHandlerId = 0;
+        this._applicationsListBox.connect('row-selected', this._selectApplicationDelayed.bind(this));
+        this._applicationsListBox.connect('row-activated', this._activateApplication.bind(this));
+
+        this._applicationsSearchEntry.connect('activate', this._selectSearch.bind(this));
+        this._applicationsSearchEntry.connect('search-changed', this._resetSearch.bind(this));
+
+        this._applicationsSearchButton.bind_property(
+            'active', this._applicationsSearchBar, 'search-mode-enabled', _bindFlags);
+
+        this._setupApplications();
+        this._setupPermissions();
+        this._updatePermissions();
+
+        this._showApplications();
+        this._backButton.set_sensitive(true);
+        this._backButton.connect('clicked', this._showApplications.bind(this));
+
+        this._applicationsSearchBar.set_key_capture_widget(this.root);
+    }
+
+    _setupApplications() {
+        for (const row of Array.from(this._applicationsListBox)) {
+            if (row instanceof Adw.ActionRow)
+                this._applicationsListBox.remove(row);
+        }
+
+        /* Find all available applications */
+        const allApplications = this._applications.getAll();
+
+        if (allApplications.length === 0) {
+            this._applicationsListBox.unselect_all();
+            this._permissionsStack.visibleChildName = 'withNoPermissionsPage';
+            return;
+        }
+
+        /* Add rows for every application */
         const iconTheme = Gtk.IconTheme.get_for_display(this.get_display());
 
         allApplications.forEach(app => {
@@ -124,6 +158,21 @@ var FlatsealWindow = GObject.registerClass({
         this._globalRow = new FlatsealGlobalRow();
         this._applicationsListBox.append(this._globalRow);
 
+        /* Select after the list has been sorted */
+        const row = this._applicationsListBox.get_row_at_index(1);
+        this._applicationsListBox.select_row(row);
+
+        /* Enable permissions view only if there's applications */
+        this._permissionsStack.visibleChildName = 'withPermissionsPage';
+    }
+
+    _setupPermissions() {
+        const allPermissions = this._permissions.getAll();
+
+        if (allPermissions.length === 0)
+            return;
+
+        /* Set up applications information viewer */
         this._appInfoViewer = new FlatsealAppInfoViewer();
         this._appInfoGroup.add(this._appInfoViewer);
         this._contentLeaflet.bind_property(
@@ -134,6 +183,7 @@ var FlatsealWindow = GObject.registerClass({
         this._contentLeaflet.bind_property(
             'folded', this._globalInfoViewer, 'compact', _bindReadFlags);
 
+        /* Load rows for every permissions */
         let lastGroup = '';
         let lastPrefsGroup;
 
@@ -208,32 +258,6 @@ var FlatsealWindow = GObject.registerClass({
 
             this._permissions.bind_property(p.statusProperty, row.status, 'status', _bindFlags);
         });
-
-        this._permissionsStack.visibleChildName = 'withPermissionsPage';
-
-        this._applicationsListBox.set_filter_func(this._filter.bind(this));
-        this._applicationsListBox.set_sort_func(this._sort.bind(this));
-
-        /* select after the list has been sorted */
-        const row = this._applicationsListBox.get_row_at_index(1);
-        this._applicationsListBox.select_row(row);
-        this._updatePermissions();
-
-        this._applicationsDelayHandlerId = 0;
-        this._applicationsListBox.connect('row-selected', this._selectApplicationDelayed.bind(this));
-        this._applicationsListBox.connect('row-activated', this._activateApplication.bind(this));
-
-        this._applicationsSearchEntry.connect('activate', this._selectSearch.bind(this));
-        this._applicationsSearchEntry.connect('search-changed', this._resetSearch.bind(this));
-
-        this._applicationsSearchButton.bind_property(
-            'active', this._applicationsSearchBar, 'search-mode-enabled', _bindFlags);
-
-        this._showApplications();
-        this._backButton.set_sensitive(true);
-        this._backButton.connect('clicked', this._showApplications.bind(this));
-
-        this._applicationsSearchBar.set_key_capture_widget(this.root);
     }
 
     _shutdown() {
@@ -258,7 +282,12 @@ var FlatsealWindow = GObject.registerClass({
     }
 
     _updatePermissionsPane(appId) {
-        if (isGlobalOverride(appId)) {
+        if (appId === '') {
+            this._resetActionButton.sensitive = false;
+            this._resetHeaderButton.sensitive = false;
+            this._detailsHeaderButton.disable();
+            this._detailsActionButton.disable();
+        } else if (isGlobalOverride(appId)) {
             this._appInfoViewer.visible = false;
             this._globalInfoViewer.visible = true;
             this._portalsGroup.visible = false;
@@ -276,11 +305,18 @@ var FlatsealWindow = GObject.registerClass({
 
     _updatePermissions() {
         const row = this._applicationsListBox.get_selected_row();
-        this._permissions.appId = row.appId;
-        this._permissionsTitle.title = row.appName;
-        this._updatePermissionsPane(row.appId);
-        this._toast.dismiss();
 
+        if (row === null) {
+            this._permissions.appId = '';
+            this._permissionsTitle.title = '';
+            this._updatePermissionsPane('');
+        } else {
+            this._permissions.appId = row.appId;
+            this._permissionsTitle.title = row.appName;
+            this._updatePermissionsPane(row.appId);
+        }
+
+        this._toast.dismiss();
         this._applicationsDelayHandlerId = 0;
         return GLib.SOURCE_REMOVE;
     }
